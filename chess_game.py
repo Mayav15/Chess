@@ -203,13 +203,13 @@ class ChessRenderer:
 
         if status == 'checkmate':
             if turn == human_color:
-                message = "Checkmate! CPU wins  —  R to restart"
+                message = "Checkmate! CPU wins"
             else:
-                message = f"Checkmate! {player_name} wins!  —  R to restart"
+                message = f"Checkmate! {player_name} wins!"
         elif status == 'stalemate':
-            message = "Stalemate — Draw!  —  R to restart"
+            message = "Stalemate — Draw!"
         elif status == 'forfeit':
-            message = f"{player_name} forfeited  —  R to restart"
+            message = f"{player_name} forfeited"
         elif is_thinking:
             message = "CPU is thinking…"
         elif status == 'check':
@@ -566,8 +566,6 @@ class ChessGame:
                         result = self.show_pause_menu()
                         if result == 'main_menu':
                             return 'main_menu'
-                elif event.key == pygame.K_r:
-                    self.reset_game()
                 elif event.key == pygame.K_UP:
                     self.scroll = max(0, self.scroll - 1)
                 elif event.key == pygame.K_DOWN:
@@ -636,7 +634,7 @@ class ChessGame:
             self.screen.blit(dots_text, (lay.board_x + lay.board_size // 2 + 140, (lay.status_bar_height - self.renderer.status_font.get_height()) // 2))
 
         # ESC/restart hint
-        hint = self.renderer.label_font.render("ESC=menu  R=restart", True, (70, 55, 40))
+        hint = self.renderer.label_font.render("ESC=menu", True, (70, 55, 40))
         self.screen.blit(hint, (lay.board_x, lay.window_height - hint.get_height() - 6))
 
         # Sidebar
