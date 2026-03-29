@@ -41,7 +41,6 @@ A single-player chess game built with Python and Pygame. Play as White or Black 
 |-----|--------|
 | Click / Drag | Select and move pieces |
 | `ESC` | Pause menu |
-| `R` | Restart game |
 | `1` / `2` / `3` | Select difficulty (start menu) |
 | Scroll / Arrow keys | Scroll move log |
 
