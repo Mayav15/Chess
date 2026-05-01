@@ -97,21 +97,25 @@ def _draw_back_button(screen, font, x, y):
     return back_rect
 
 
-# First screen — choose 1 Player or 2 Player
+# First screen — choose 1 Player, 2 Player, or open Profiles
 class ModeMenu:
     #The main menu that appears when the game starts. Player picks 1P (vs CPU) or 2P (local)
+    #Optionally shows the currently logged-in user, with a "Profiles" button to manage accounts
 
-    def __init__(self, screen, clock):
+    def __init__(self, screen, clock, logged_in_user=None):
         self.screen = screen
         self.clock = clock
+        self.logged_in_user = logged_in_user  #None for guest, otherwise dict from ProfileDB
         self.title_font = pygame.font.SysFont("georgia,serif", 64, bold=True)
         self.heading_font = pygame.font.SysFont("georgia,serif", 28, bold=True)
         self.button_font = pygame.font.SysFont("georgia,serif", 22, bold=True)
+        self.small_font = pygame.font.SysFont("georgia,serif", 18)
         self.piece_font = pygame.font.SysFont("segoeuisymbol,symbola,freesans,dejavusans", 48)
         self.mode_buttons = {}
+        self.profiles_button = None
 
     def run(self):
-        #Main loop for the mode menu. Returns '1player' or '2player' when a button is clicked
+        #Main loop for the mode menu. Returns '1player', '2player', or 'profiles'
         while True:
             self.clock.tick(FPS)
             width = self.screen.get_width()
@@ -129,13 +133,15 @@ class ModeMenu:
                     for mode, btn_rect in self.mode_buttons.items():
                         if btn_rect.collidepoint(mouse_x, mouse_y):
                             return mode
+                    if self.profiles_button and self.profiles_button.collidepoint(mouse_x, mouse_y):
+                        return 'profiles'
 
             self.draw(center_x, height)
             pygame.display.flip()
 
     def draw(self, center_x, height):
         self.screen.fill(BACKGROUND)
-        current_y = height // 2 - 160
+        current_y = height // 2 - 180
 
         # Title
         title = self.title_font.render("Chess", True, GOLD)
@@ -158,6 +164,23 @@ class ModeMenu:
             [('1player', '1 Player'), ('2player', '2 Player')],
             None, btn_width=180, btn_height=56, gap=30
         )
+        current_y += 56 + 30
+
+        # Profiles button — secondary action below the mode buttons
+        profile_width = 200
+        profile_height = 44
+        self.profiles_button = pygame.Rect(center_x - profile_width // 2, current_y, profile_width, profile_height)
+        pygame.draw.rect(self.screen, (50, 40, 30), self.profiles_button, border_radius=8)
+        pygame.draw.rect(self.screen, GOLD, self.profiles_button, 2, border_radius=8)
+        profile_text = self.button_font.render("Profiles", True, GOLD)
+        self.screen.blit(profile_text, (self.profiles_button.centerx - profile_text.get_width() // 2,
+                                          self.profiles_button.centery - profile_text.get_height() // 2))
+        current_y += profile_height + 10
+
+        # If someone is logged in, show their username in small gold text
+        if self.logged_in_user:
+            login_text = self.small_font.render(f"Logged in as: {self.logged_in_user['username']}", True, GOLD)
+            self.screen.blit(login_text, (center_x - login_text.get_width() // 2, current_y))
 
 
 # Second screen for 1 Player — name, difficulty, color
@@ -165,10 +188,10 @@ class SinglePlayerMenu:
     #Settings screen for 1 Player mode. Player enters their name, picks difficulty (1-3),
     #and chooses to play as White or Black. Returns a settings dict or None if they press back
 
-    def __init__(self, screen, clock):
+    def __init__(self, screen, clock, default_name=""):
         self.screen = screen
         self.clock = clock
-        self.player_name = ""
+        self.player_name = default_name  #Pre-filled if a profile is logged in
         self.difficulty = 2  #Default to medium
         self.player_color = 'w'  #Default to white
         self.heading_font = pygame.font.SysFont("georgia,serif", 28, bold=True)
@@ -308,10 +331,10 @@ class TwoPlayerMenu:
     #Settings screen for 2 Player mode. Both players enter their names
     #Player 1 is always White, Player 2 is always Black. Tab switches between inputs
 
-    def __init__(self, screen, clock):
+    def __init__(self, screen, clock, default_name=""):
         self.screen = screen
         self.clock = clock
-        self.player1_name = ""
+        self.player1_name = default_name  #Pre-filled if a profile is logged in
         self.player2_name = ""
         self.active_input = 'player1'  #Which name input is currently focused
         self.heading_font = pygame.font.SysFont("georgia,serif", 28, bold=True)

@@ -1,6 +1,6 @@
 # Chess AI — Board logic and minimax AI with alpha-beta pruning
 
-import copy
+import random
 
 FILE_LETTERS = 'abcdefgh'
 #The letters used in chess notation, a-h representing the columns (files) of the board
@@ -214,7 +214,8 @@ class ChessBoard:
     def apply_move(self, board, row, col, new_row, new_col):
         #Creates a new board with the move applied (doesn't modify the original)
         #Also handles special moves: en passant capture, castling rook movement, pawn promotion
-        new_board = copy.deepcopy(board)
+        new_board = [row[:] for row in board]
+        #Shallow copy is enough because each cell is either None or an immutable tuple
         piece, color = new_board[row][col]
         new_board[new_row][new_col] = new_board[row][col]
         new_board[row][col] = None
@@ -304,6 +305,15 @@ class ChessAI:
                     score -= value
         return score
 
+    def _move_sort_key(self, board, destination):
+        #Scores a move for ordering: captures of high-value pieces are searched first
+        #This makes alpha-beta pruning much more effective because the best moves are tried early,
+        #causing more branches to be pruned (skipped)
+        target = board[destination[0]][destination[1]]
+        if target:
+            return -PIECE_VALUES[target[0]]  #Negative so high-value captures come first when sorted
+        return 0
+
     def minimax(self, board, depth, alpha, beta, is_maximizing, last_move):
         #Minimax algorithm — recursively explores all possible moves to find the best one
         #is_maximizing=True means it's white's turn (trying to maximize score)
@@ -323,6 +333,9 @@ class ChessAI:
         # Reached search depth — stop recursing and evaluate the position as-is
         if depth == 0:
             return self.evaluate(board), None
+
+        # Sort moves so captures are searched first (makes alpha-beta pruning way more effective)
+        moves.sort(key=lambda m: self._move_sort_key(board, m[1]))
 
         best_move = None
 
@@ -357,7 +370,40 @@ class ChessAI:
 
     def think(self, board, last_move, result):
         #Entry point for the AI to pick a move. Runs in a separate thread so the game doesn't freeze
-        #result[0] is set to the chosen move so the main thread can read it
+        #result[0] is set to the chosen move, result[1] is the evaluation score
+        #The evaluation score is saved for training data collection
+        #
+        #To add variety, we evaluate all top-level moves and randomly pick from the ones
+        #that are within a small margin of the best score. This way the AI still plays well
+        #but doesn't always pick the exact same move from the same position.
         is_maximizing = (self.color == 'w')
-        _, move = self.minimax(board, self.depth, -999999, 999999, is_maximizing, last_move)
+        color = 'w' if is_maximizing else 'b'
+        moves = self.chess_board.get_all_legal_moves(board, color, last_move)
+
+        if not moves:
+            result[0] = None
+            result.append(0)
+            return
+
+        # Score every top-level move
+        scored_moves = []
+        for source, destination in moves:
+            new_board = self.chess_board.apply_move(board, source[0], source[1], destination[0], destination[1])
+            piece = board[source[0]][source[1]][0]
+            child_score, _ = self.minimax(new_board, self.depth - 1, -999999, 999999, not is_maximizing, (source, destination, piece))
+            scored_moves.append((child_score, (source, destination)))
+
+        # Find the best score and collect all moves within a small margin of it
+        if is_maximizing:
+            best_score = max(s for s, _ in scored_moves)
+            margin = 30  #Moves within 30 centipawns of the best are considered equally good
+            candidates = [(s, m) for s, m in scored_moves if s >= best_score - margin]
+        else:
+            best_score = min(s for s, _ in scored_moves)
+            margin = 30
+            candidates = [(s, m) for s, m in scored_moves if s <= best_score + margin]
+
+        # Randomly pick from the top candidates
+        score, move = random.choice(candidates)
         result[0] = move
+        result.append(score)

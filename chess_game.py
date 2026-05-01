@@ -7,6 +7,9 @@ import sys
 import threading
 from chess_ai import ChessBoard, ChessAI
 from chess_menus import ModeMenu, SinglePlayerMenu, TwoPlayerMenu, PauseMenu
+from chess_profiles import ProfileMenu, LoginScreen, SignupScreen
+from chess_db import ProfileDB
+from game_data_collector import GameDataCollector
 
 pygame.init()
 display_info = pygame.display.Info()
@@ -411,7 +414,7 @@ class ChessGame:
     #and ties together the AI, renderer, and event handling
 
     def __init__(self, screen, clock, layout, player_name, difficulty=2, player_color='w',
-                 two_player=False, player2_name="Player 2"):
+                 two_player=False, player2_name="Player 2", logged_in_user=None, db=None):
         self.screen = screen
         self.clock = clock
         self.layout = layout
@@ -419,6 +422,9 @@ class ChessGame:
         self.player2_name = player2_name
         self.difficulty = difficulty
         self.two_player = two_player
+        self.logged_in_user = logged_in_user  #None for guest, otherwise dict from ProfileDB
+        self.db = db  #Database connection (used to update stats when game ends)
+        self.stats_recorded = False  #Prevent recording twice if save is called multiple times
         self.human_color = player_color
         self.cpu_color = 'b' if player_color == 'w' else 'w'
         self.flipped = (player_color == 'b') if not two_player else False
@@ -431,6 +437,13 @@ class ChessGame:
             self.ai = None  #No AI needed in 2 player mode
         self.renderer = ChessRenderer(self.layout, self.player_name, self.flipped)
         self.pause_menu = PauseMenu(self.screen, self.clock)
+
+        # Data collector — silently records every game for future neural network training
+        self.collector = GameDataCollector(
+            mode='cpu' if not two_player else '2player',
+            difficulty=difficulty if not two_player else None
+        )
+        self.cpu_eval_score = None  #Stores the CPU's minimax evaluation for data collection
 
         self.move_counter = 0
         self.reset_game()
@@ -466,6 +479,7 @@ class ChessGame:
         self.black_captures = []
         self.move_log = []
         self.scroll = 0
+        self.move_history = {}  #Tracks how many times each move has been made by each side
         self.update_status()
 
         # If human plays Black in single-player, the CPU (White) moves first
@@ -491,6 +505,7 @@ class ChessGame:
 
     def commit_move(self, source, destination):
         #Applies a move to the board, updates scores, captures, and the move log
+        board_before = [row[:] for row in self.board]  #Snapshot for data collection
         piece = self.board[source[0]][source[1]][0]
         mover_color = self.board[source[0]][source[1]][1]
         captured_cell = self.board[destination[0]][destination[1]]
@@ -514,6 +529,20 @@ class ChessGame:
         self.highlights = [source, destination]  #Highlight the move that was just made
         self.update_status()
 
+        # Track move repetition — if the same move is made 10 times by one side, it's a draw
+        move_key = (mover_color, source, destination)
+        self.move_history[move_key] = self.move_history.get(move_key, 0) + 1
+        if self.move_history[move_key] >= 10 and self.status not in ('checkmate', 'stalemate'):
+            self.status = 'stalemate'
+            self.check_square = None
+
+        # Only kings left on the board — no one can win, it's a draw
+        if self.status not in ('checkmate', 'stalemate'):
+            pieces_left = [cell for row in self.board for cell in row if cell is not None]
+            if all(piece == 'K' for piece, _ in pieces_left):
+                self.status = 'stalemate'
+                self.check_square = None
+
         # Update captures and score if a piece was taken
         if actual_capture:
             captured_piece = actual_capture[0]
@@ -533,6 +562,13 @@ class ChessGame:
         # Auto-scroll to the bottom of the move log
         self.scroll = len(self.move_log)
 
+        # Record this move for training data collection
+        # CPU moves in 1P games include the minimax evaluation score
+        evaluation = None
+        if not self.two_player and mover_color == self.cpu_color:
+            evaluation = self.cpu_eval_score
+        self.collector.record_move(board_before, mover_color, source, destination, notation, evaluation)
+
     def start_cpu_turn(self):
         #Starts the AI thinking in a background thread so the game doesn't freeze while it calculates
         self.cpu_thinking = True
@@ -541,6 +577,42 @@ class ChessGame:
         #daemon=True means the thread will be killed when the main program exits
         thread.start()
         self.cpu_thread = thread
+
+    def _save_game_data(self):
+        #Determines the game outcome and saves the recorded data to a JSON file
+        if self.status == 'checkmate':
+            winner = 'b' if self.turn == 'w' else 'w'  #The player whose turn it is got checkmated
+            result = 'white_win' if winner == 'w' else 'black_win'
+        elif self.status == 'stalemate':
+            result = 'draw'
+        else:
+            result = 'forfeit'
+        self.collector.set_result(result)
+        self.collector.save()
+        #Update the logged-in player's profile stats (skipped for guests and 2P games)
+        self._record_stats(result)
+
+    def _record_stats(self, result):
+        #Updates the logged-in user's win/loss/draw count in the database
+        #Only runs if a profile is logged in. 2P games don't update stats since two
+        #people share one keyboard — we don't know which one is the logged-in player
+        if self.stats_recorded or not self.logged_in_user or not self.db or self.two_player:
+            return
+
+        #Figure out the result from the logged-in player's perspective
+        if result == 'draw':
+            stat_result = 'draw'
+        elif result == 'forfeit':
+            stat_result = 'loss'  #1P forfeit always counts as a loss for the human
+        elif result == 'white_win':
+            stat_result = 'win' if self.human_color == 'w' else 'loss'
+        elif result == 'black_win':
+            stat_result = 'win' if self.human_color == 'b' else 'loss'
+        else:
+            return
+
+        self.db.update_stats(self.logged_in_user['id'], stat_result)
+        self.stats_recorded = True
 
     def select_piece(self, row, col):
         #Selects a piece at the given square (if it belongs to the current player)
@@ -585,6 +657,7 @@ class ChessGame:
         result = self.pause_menu.run(white_label, black_label, self.white_score, self.black_score, self.two_player)
         if result in ('forfeit', 'quit'):
             self.cpu_thinking = False
+            self._save_game_data()  #Save game data before returning to menu
             return 'main_menu'
         return 'resume'
 
@@ -600,7 +673,11 @@ class ChessGame:
 
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    if self.status not in ('checkmate', 'stalemate'):
+                    if self.status in ('checkmate', 'stalemate'):
+                        #Game is over — save data and go back to the main menu
+                        self._save_game_data()
+                        return 'main_menu'
+                    else:
                         result = self.show_pause_menu()
                         if result == 'main_menu':
                             return 'main_menu'
@@ -714,6 +791,8 @@ class ChessGame:
             if self.cpu_thinking and self.cpu_result[0] is not None:
                 self.cpu_thinking = False
                 source, destination = self.cpu_result[0]
+                # Grab the evaluation score for data collection (appended by think())
+                self.cpu_eval_score = self.cpu_result[1] if len(self.cpu_result) > 1 else None
                 self.commit_move(source, destination)
                 self.cpu_highlights = [source, destination]  #Show where the CPU moved
 
@@ -728,6 +807,31 @@ class ChessGame:
             self.draw()
 
 
+def _handle_profile_flow(screen, clock, db, logged_in_user):
+    #Shows the profile menu and handles login/signup/guest/logout actions
+    #Returns the (possibly updated) logged_in_user
+    profile_menu = ProfileMenu(screen, clock, db, logged_in_user)
+    result = profile_menu.run()
+    action = result['action']
+
+    if action == 'login':
+        login_screen = LoginScreen(screen, clock, db)
+        user = login_screen.run()
+        if user:
+            return user
+    elif action == 'signup':
+        signup_screen = SignupScreen(screen, clock, db)
+        user = signup_screen.run()
+        if user:
+            return user
+    elif action == 'guest':
+        return None  #Play as guest = no logged-in user
+    elif action == 'logout':
+        return None  #Logging out also clears the user
+    #'back' or any other case: keep the current logged_in_user as-is
+    return logged_in_user
+
+
 def main():
     #Entry point — sets up the window and runs the menu → game loop
     layout = Layout(int(SCREEN_WIDTH * 0.9), int(SCREEN_HEIGHT * 0.9))
@@ -737,17 +841,32 @@ def main():
     pygame.display.set_caption("Chess")
     clock = pygame.time.Clock()
 
+    # Open the database once at startup; all menus and games share this connection
+    db = ProfileDB()
+    logged_in_user = None  #None means "playing as guest"
+
     while True:
-        # Step 1: Choose game mode (1 Player or 2 Player)
-        mode_menu = ModeMenu(screen, clock)
+        # Step 1: Choose game mode (or open Profiles)
+        mode_menu = ModeMenu(screen, clock, logged_in_user=logged_in_user)
         mode = mode_menu.run()
 
+        # Profiles button — show the profile screen and loop back to the mode menu
+        if mode == 'profiles':
+            screen = pygame.display.get_surface()
+            logged_in_user = _handle_profile_flow(screen, clock, db, logged_in_user)
+            #After login/signup, fetch the latest user data so stats panel is up to date
+            if logged_in_user:
+                logged_in_user = db.get_user(logged_in_user['id'])
+            continue
+
         # Step 2: Show the settings screen for the chosen mode
+        #Pre-fill the player name from the logged-in profile if there is one
+        default_name = logged_in_user['username'] if logged_in_user else ""
         screen = pygame.display.get_surface()
         if mode == '1player':
-            menu = SinglePlayerMenu(screen, clock)
+            menu = SinglePlayerMenu(screen, clock, default_name=default_name)
         else:
-            menu = TwoPlayerMenu(screen, clock)
+            menu = TwoPlayerMenu(screen, clock, default_name=default_name)
         settings = menu.run()
 
         # If they pressed ESC or Back, go back to mode selection
@@ -763,16 +882,23 @@ def main():
         # Step 3: Start the game with the chosen settings
         if settings['mode'] == 'cpu':
             game = ChessGame(screen, clock, layout, settings['player_name'],
-                             difficulty=settings['difficulty'], player_color=settings['player_color'])
+                             difficulty=settings['difficulty'], player_color=settings['player_color'],
+                             logged_in_user=logged_in_user, db=db)
         else:
             game = ChessGame(screen, clock, layout, settings['player_name'],
-                             two_player=True, player2_name=settings['player2_name'])
+                             two_player=True, player2_name=settings['player2_name'],
+                             logged_in_user=logged_in_user, db=db)
         result = game.run()
+
+        # Refresh the logged-in user's data so the stats panel reflects the new game
+        if logged_in_user:
+            logged_in_user = db.get_user(logged_in_user['id'])
 
         if result == 'quit':
             break
         # result == 'main_menu' loops back to the mode selection screen
 
+    db.close()
     pygame.quit()
     sys.exit()
 
